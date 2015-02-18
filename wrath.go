@@ -1,12 +1,14 @@
 /*
 
+#### Overview
 Wrath - redis-backed auth - rauth - wrath
 
 There are:
-        Identities
-        Actors
-        Roles
+ * Identities
+ * Actors
+ * Roles
 
+```
 An Identity     is referred to through a UUID and is a pair of [id, password], where the id and password are JSON strings - There is a root identity - An Identities id MUST BE GLOBALLY UNIQUE
 A Role          is referred to through a UUID and is a JSON string - There is a root role - A Role MUST BE GLOBALLY UNIQUE
 An Actor        is referred to through a UUID and is a JSON object - There is a root actor
@@ -15,17 +17,19 @@ A relationship  is referred to through a UUID, with the following as possible re
         An Actor        can have zero or more Identities
         An Actor        can have zero or more Roles
         A Role          can have zero or more Actors - the root actor is associated with the root role
+```
 
-Token: the temporary proof of having provided a valid Identity
+**Token**: the temporary proof of having provided a valid Identity
 
-Authentication: the process of an Actor providing an Identity and recieving a Token
+**Authentication**: the process of an Actor providing an Identity and recieving a Token
 
-Authorization: the verification that a Token is related to a Role
-        Nothing can be done without a valid Token
-        The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role
+**Authorization**: the verification that a Token is related to a Role.
+        Nothing can be done without a valid Token.
+        The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role.
         No other Role represents the authorization for any action in the system
 
-Redis Key Types:
+#### Redis Key Types
+```
         UNIQUE:IDENTITY         set of Identity ids
         UNIQUE:ROLE             set of Role values
 
@@ -42,15 +46,16 @@ Redis Key Types:
 
         ACTOR:ROLE:auuid        set of 'ruuids'
         ROLE:ACTOR:ruuid        set of 'auuids'
-
+```
 
 The root role is a Role who's value is the JSON string `"root"`
 
 A Token is a UUID whos value is an iuuid, see the '/t' definition below
 
-Without a token, a 401 is returned
-Without a valid token representing the authorization of the root role, a 403 is returned
+ * Without a token, a 401 is returned
+ * Without a valid token representing the authorization of the root role, a 403 is returned
 
+```
         /i
                 POST /i (create an Identity - body is json array - first value is anything (a uuid or email are common) and it is required to be unique - second value is password - response is uuid - 201 or 400)
                 GET /i (get all identities - response is object of uuids to json arrays - 200)
@@ -83,7 +88,7 @@ Without a valid token representing the authorization of the root role, a 403 is 
                 GET /z/{url encoded uuid or email} (response is array of Roles associated with Identity - 200 or 404)
         /t
                 GET /t (authorization header has "BASIC " prefixed b64 of colon joined Identity pair - response is tuuid - 200 or 404)
-
+```
 */
 package main
 
