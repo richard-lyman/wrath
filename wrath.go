@@ -7,23 +7,23 @@ There are:
         Actors
         Roles
 
-An Identity     is referred to through a UUID and is a pair of [id, password], where the id and password are JSON strings - There is a root identity - An Identities id MUST BE GLOBALLY UNIQUE
-A Role          is referred to through a UUID and is a JSON string - There is a root role - A Role MUST BE GLOBALLY UNIQUE
-An Actor        is referred to through a UUID and is a JSON object - There is a root actor
-A relationship  is referred to through a UUID, with the following as possible relationships:
-        An Identity     can have zero or *one* Actor(s) - the root identity is associated with the root actor
-        An Actor        can have zero or more Identities
-        An Actor        can have zero or more Roles
-        A Role          can have zero or more Actors - the root actor is associated with the root role
+        An Identity     is referred to through a UUID and is a pair of [id, password], where the id and password are JSON strings - There is a root identity - An Identities id MUST BE GLOBALLY UNIQUE
+        A Role          is referred to through a UUID and is a JSON string - There is a root role - A Role MUST BE GLOBALLY UNIQUE
+        An Actor        is referred to through a UUID and is a JSON object - There is a root actor
+        A relationship  is referred to through a UUID, with the following as possible relationships:
+                An Identity     can have zero or *one* Actor(s) - the root identity is associated with the root actor
+                An Actor        can have zero or more Identities
+                An Actor        can have zero or more Roles
+                A Role          can have zero or more Actors - the root actor is associated with the root role
 
 Token: the temporary proof of having provided a valid Identity
 
 Authentication: the process of an Actor providing an Identity and recieving a Token
 
 Authorization: the verification that a Token is related to a Role
-        Nothing can be done without a valid Token
-        The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role
-        No other Role represents the authorization for any action in the system
+  Nothing can be done without a valid Token
+  The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role
+  No other Role represents the authorization for any action in the system
 
 Redis Key Types:
         UNIQUE:IDENTITY         set of Identity ids
