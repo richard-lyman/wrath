@@ -1,3 +1,5 @@
+[![GoDoc](https://godoc.org/github.com/richard-lyman/wrath?status.svg)](https://godoc.org/github.com/richard-lyman/wrath)
+
 #### Overview
 Wrath - redis-backed auth - rauth - wrath
 
