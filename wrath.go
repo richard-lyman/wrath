@@ -569,7 +569,7 @@ func update(prefix string, uuid string, value []byte) error {
 		tmp := []string{}
 		err := json.Unmarshal(value, &tmp)
 		if err != nil {
-			return "", err
+			return err
 		}
 		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tmp[1]), 10)
 		if err != nil {
@@ -1197,13 +1197,6 @@ func tGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authHeaderPair := strings.Split(string(tmp), ":")
-	tuuid := genUUID()
-	/* TODO - NONE OF THE BELOW WORKS...
-	   hashedPassword, err := bcrypt.GenerateFromPassword(password, 10)
-	   if err != nil {
-	           panic(err)
-	   }
-	*/
 	reply := client.Cmd("EVAL", `
                 local cursor = "0"
                 local iuuids = nil
@@ -1215,29 +1208,35 @@ func tGet(w http.ResponseWriter, r *http.Request) {
                         iuuids = result[2]
                         for i, iuuid in ipairs(iuuids) do
                                 identityPair = cjson.decode(redis.call("GET", "IDENTITY:"..iuuid))
-                                if identityPair[1] == cjson.decode(ARGV[1]) and identityPair[2] == cjson.decode(ARGV[2]) then
-                                        return iuuid
+                                if identityPair[1] == cjson.decode(ARGV[1]) then
+                                        return {iuuid, identityPair[2]}
                                 end
                         end
                         if cursor == "0" then
                                 done = true
                         end
                 until done
-                return ""`, 0, authHeaderPair[0], authHeaderPair[1])
+                return {}`, 0, authHeaderPair[0])
 	if reply.Err != nil {
 		log.Println("Unable to run get token script:", reply.Err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	iuuid, err := reply.Str()
+	resultPair, err := reply.List()
 	if err != nil {
 		log.Println("Unable to get token:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+        iuuid := resultPair[0]
+        hashedPassword := resultPair[1]
+	if bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(authHeaderPair[1])) != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	if len(iuuid) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
+		tuuid := genUUID()
 		setReply := client.Cmd("SET", "TOKEN:"+tuuid, iuuid, "EX", "3600")
 		if setReply.Err != nil {
 			log.Println("Unable to set token:", setReply.Err)
