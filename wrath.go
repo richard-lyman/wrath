@@ -87,6 +87,7 @@ Without a valid token representing the authorization of the root role, a 403 is 
 
 */
 package main
+
 /*
 The MIT License (MIT)
 
@@ -121,6 +122,7 @@ import (
 	"fmt"
 	"github.com/fzzy/radix/redis"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -181,11 +183,11 @@ func main() {
 	router.PathPrefix("/t").Methods("GET").HandlerFunc(tGet)
 	router.PathPrefix("/").HandlerFunc(b)
 	http.Handle("/", router)
-        if len(*certFile) != 0 && len(*keyFile) != 0 {
-                log.Fatal(http.ListenAndServeTLS(*hostPort, *certFile, *keyFile, has_or_will_get_root(has_or_will_get_token(http.DefaultServeMux))))
-        } else {
-                log.Fatal(http.ListenAndServe(*hostPort, has_or_will_get_root(has_or_will_get_token(http.DefaultServeMux))))
-        }
+	if len(*certFile) != 0 && len(*keyFile) != 0 {
+		log.Fatal(http.ListenAndServeTLS(*hostPort, *certFile, *keyFile, has_or_will_get_root(has_or_will_get_token(http.DefaultServeMux))))
+	} else {
+		log.Fatal(http.ListenAndServe(*hostPort, has_or_will_get_root(has_or_will_get_token(http.DefaultServeMux))))
+	}
 }
 
 func ensureRoot() {
@@ -220,6 +222,7 @@ func ensureRoot() {
 	}
 	iuuid := genUUID()
 	ipassword := genUUID()
+	// TODO - add a way for root to bcrypt it's password when it's ready
 	auuid := genUUID()
 	ruuid := genUUID()
 	rootSetupReply := client.Cmd("EVAL", `
@@ -240,6 +243,7 @@ func ensureRoot() {
 	log.Println("Root created.")
 }
 
+// TODO - add a way for root to bcrypt it's password when it's ready
 func involvesRoot(uuid string) bool {
 	if len(uuid) == 0 {
 		return false
@@ -472,6 +476,22 @@ func add(prefix string, value []byte) (string, error) {
 		}
 	}
 	uuid := genUUID()
+	if prefix == "IDENTITY" {
+		tmp := []string{}
+		err := json.Unmarshal(value, &tmp)
+		if err != nil {
+			return "", err
+		}
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tmp[1]), 10)
+		if err != nil {
+			log.Panicf("Unable to encrypt password: %s", err)
+		}
+		tmp[1] = string(hashedPassword)
+		value, err = json.Marshal(tmp)
+		if err != nil {
+			log.Panicf("Unable to encode encrypted password: %s", err)
+		}
+	}
 	if reply := client.Cmd("SET", prefix+":"+uuid, value); reply.Err != nil {
 		return "", reply.Err
 	}
@@ -544,6 +564,22 @@ func update(prefix string, uuid string, value []byte) error {
 			return err
 		}
 		previousRole = previousRoleTmp
+	}
+	if prefix == "IDENTITY" {
+		tmp := []string{}
+		err := json.Unmarshal(value, &tmp)
+		if err != nil {
+			return "", err
+		}
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(tmp[1]), 10)
+		if err != nil {
+			log.Panicf("Unable to encrypt password: %s", err)
+		}
+		tmp[1] = string(hashedPassword)
+		value, err = json.Marshal(tmp)
+		if err != nil {
+			log.Panicf("Unable to encode encrypted password: %s", err)
+		}
 	}
 	reply := client.Cmd("SET", prefix+":"+uuid, value, "XX")
 	if reply.Type == redis.NilReply {
@@ -1162,6 +1198,12 @@ func tGet(w http.ResponseWriter, r *http.Request) {
 	}
 	authHeaderPair := strings.Split(string(tmp), ":")
 	tuuid := genUUID()
+	/* TODO - NONE OF THE BELOW WORKS...
+	   hashedPassword, err := bcrypt.GenerateFromPassword(password, 10)
+	   if err != nil {
+	           panic(err)
+	   }
+	*/
 	reply := client.Cmd("EVAL", `
                 local cursor = "0"
                 local iuuids = nil
