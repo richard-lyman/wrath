@@ -144,6 +144,7 @@ const NON_UNIQUE_ROLE = "The provided role is not unique, or we're unable to ver
 
 var hostPort = flag.String("hostPort", ":8765", "The host:port to bind to. To bind to all interfaces, provide ':port' as the value.")
 var redisHostPort = flag.String("redisHostPort", "localhost:6379", "The host:port for redis.")
+var tokenTTL = flag.Int("tokenTTL", 3600, "The TTL for TOKEN keys in Redis.")
 var certFile = flag.String("certFile", "", "Location of certFile - if this flag and the keyFile flag are given values, HTTPS will be used.")
 var keyFile = flag.String("keyFile", "", "Location of keyFile - if this flag and the certFile flag are given values, HTTPS will be used.")
 
@@ -1228,21 +1229,28 @@ func tGet(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-        iuuid := resultPair[0]
-        hashedPassword := resultPair[1]
-	if bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(authHeaderPair[1])) != nil {
+	if len(resultPair) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
+                return
 	}
-	if len(iuuid) == 0 {
+	iuuid := resultPair[0]
+        givenPassword := ""
+        if json.Unmarshal([]byte(authHeaderPair[1]), &givenPassword) != nil {
+                log.Println("Unable to unmarshal password from authpair:", err)
+                w.WriteHeader(http.StatusInternalServerError)
+                return
+        }
+	hashedPassword := resultPair[1]
+	if len(iuuid) == 0 || bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(givenPassword)) != nil {
 		w.WriteHeader(http.StatusBadRequest)
-	} else {
-		tuuid := genUUID()
-		setReply := client.Cmd("SET", "TOKEN:"+tuuid, iuuid, "EX", "3600")
-		if setReply.Err != nil {
-			log.Println("Unable to set token:", setReply.Err)
-			w.WriteHeader(http.StatusInternalServerError)
-		} else {
-			w.Write([]byte(tuuid))
-		}
+                return
 	}
+        tuuid := genUUID()
+        setReply := client.Cmd("SET", "TOKEN:"+tuuid, iuuid, "EX", *tokenTTL)
+        if setReply.Err != nil {
+                log.Println("Unable to set token:", setReply.Err)
+                w.WriteHeader(http.StatusInternalServerError)
+        } else {
+                w.Write([]byte(tuuid))
+        }
 }
