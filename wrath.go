@@ -2,19 +2,23 @@
 
 Wrath - redis-backed auth - rauth - wrath
 
-There are:
-        Identities
-        Actors
-        Roles
+BASE ENTITIES
 
-An Identity     is referred to through a UUID and is a pair of [id, password], where the id and password are JSON strings - There is a root identity - An Identities id MUST BE GLOBALLY UNIQUE
-A Role          is referred to through a UUID and is a JSON string - There is a root role - A Role MUST BE GLOBALLY UNIQUE
-An Actor        is referred to through a UUID and is a JSON object - There is a root actor
-A relationship  is referred to through a UUID, with the following as possible relationships:
+There are: Identities, Actors, Roles, and Relationships.
+
+An Identity is referred to through a UUID and is a
+	pair of [id, password], where the id and password are JSON strings - There is a root identity - An Identities id MUST BE GLOBALLY UNIQUE.
+An Actor is referred to through a UUID and is a
+	JSON object - There is a root actor.
+A Role is referred to through a UUID and is a
+	JSON string - There is a root role - A Role MUST BE GLOBALLY UNIQUE.
+A Relationship  is referred to through a UUID, with the following as possible relationships:
 	An Identity     can have zero or *one* Actor(s) - the root identity is associated with the root actor
 	An Actor        can have zero or more Identities
 	An Actor        can have zero or more Roles
 	A Role          can have zero or more Actors - the root actor is associated with the root role
+
+TERMS
 
 Token: the temporary proof of having provided a valid Identity
 
@@ -25,7 +29,8 @@ Authorization: the verification that a Token is related to a Role
  * The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role
  * No other Role represents the authorization for any action in the system
 
-Redis Key Types:
+REDIS KEY TYPES
+
         UNIQUE:IDENTITY         set of Identity ids
         UNIQUE:ROLE             set of Role values
 
@@ -52,7 +57,7 @@ Without a token, a 401 is returned
 
 Without a valid token representing the authorization of the root role, a 403 is returned
 
-Routes:
+ROUTES
 
 /i
 	POST /i (create an Identity - body is json array - first value is anything (a uuid or email are common) and it is required to be unique - second value is password - response is uuid - 201 or 400)
