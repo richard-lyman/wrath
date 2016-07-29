@@ -2,7 +2,7 @@
 
 Wrath - redis-backed auth - rauth - wrath
 
-BASE ENTITIES
+Base Entities
 
 There are: Identities, Actors, Roles, and Relationships.
 
@@ -18,7 +18,7 @@ A Relationship  is referred to through a UUID, with the following as possible re
 	An Actor        can have zero or more Roles
 	A Role          can have zero or more Actors - the root actor is associated with the root role
 
-TERMS
+Terms
 
 Token:
 	the temporary proof of having provided a valid Identity
@@ -27,7 +27,7 @@ Authentication:
 Authorization:
 	the verification that a Token is related to a Role
 
-Authorization highlights
+Authorization Highlights
 
 Nothing can be done without a valid Token.
 The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role.
@@ -38,7 +38,7 @@ A Token is a UUID whos value is a tuuid (see the '/t' definition below).
 Without a token, a 401 is returned for all calls.
 Without a valid token representing the authorization of the root role, a 403 is returned.
 
-REDIS KEY TYPES
+Redis Key Types
 
         UNIQUE:IDENTITY         set of Identity ids
         UNIQUE:ROLE             set of Role values
@@ -57,7 +57,7 @@ REDIS KEY TYPES
         ACTOR:ROLE:auuid        set of 'ruuids'
         ROLE:ACTOR:ruuid        set of 'auuids'
 
-ROUTES
+Routes
 
 /i
 	POST /i (create an Identity - body is json array - first value is anything (a uuid or email are common) and it is required to be unique - second value is password - response is uuid - 201 or 400)
