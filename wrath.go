@@ -146,7 +146,7 @@ func genUUID() string {
 	if c != 16 || err != nil {
 		panic(fmt.Sprintf("Not able to generate a UUID: %q", err))
 	}
-	b[8] = 0x80 // TODO - get the right mask and then AND the right value
+	b[8] = (b[8] & 0x3F) | 0x80
 	b[6] = 0x40
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
