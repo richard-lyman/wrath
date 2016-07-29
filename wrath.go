@@ -120,21 +120,26 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/fzzy/radix/redis"
 	"github.com/gorilla/mux"
+	"github.com/richard-lyman/redisb"
 	"golang.org/x/crypto/bcrypt"
+	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 )
 
-var client *redis.Client
+var c net.Conn
 
 func genUUID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
-	b[8] = 0x80
+	c, err := io.ReadFull(rand.Reader, b)
+	if c != 16 || err != nil {
+		panic(fmt.Sprintf("Not able to generate a UUID: %q", err))
+	}
+	b[8] = 0x80 // TODO - get the right mask and then AND the right value
 	b[6] = 0x40
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
@@ -144,17 +149,17 @@ const NON_UNIQUE_ROLE = "The provided role is not unique, or we're unable to ver
 
 var hostPort = flag.String("hostPort", ":8765", "The host:port to bind to. To bind to all interfaces, provide ':port' as the value.")
 var redisHostPort = flag.String("redisHostPort", "localhost:6379", "The host:port for redis.")
-var tokenTTL = flag.Int("tokenTTL", 3600, "The TTL for TOKEN keys in Redis.")
+var tokenTTL = flag.String("tokenTTL", "3600", "The TTL for TOKEN keys in Redis.")
 var certFile = flag.String("certFile", "", "Location of certFile - if this flag and the keyFile flag are given values, HTTPS will be used.")
 var keyFile = flag.String("keyFile", "", "Location of keyFile - if this flag and the certFile flag are given values, HTTPS will be used.")
 
 func main() {
 	flag.Parse()
-	tmp, err := redis.Dial("tcp", *redisHostPort)
+	tmp, err := net.Dial("tcp", *redisHostPort)
 	if err != nil {
 		log.Fatalf("Unable to connect to redis: %s", err)
 	}
-	client = tmp
+	c = tmp
 	ensureRoot()
 	router := mux.NewRouter()
 	router.PathPrefix("/ai/{auuid}/{iuuid}").Methods("POST").HandlerFunc(aiPost)
@@ -192,7 +197,7 @@ func main() {
 }
 
 func ensureRoot() {
-	reply := client.Cmd("EVAL", `
+	reply, err := redisb.Do(c, "EVAL", `
                 local cursor = "0"
                 local ruuids = nil
                 local done = false
@@ -211,12 +216,12 @@ func ensureRoot() {
                                 done = true
                         end
                 until done
-                return 0`, 0)
-	if reply.Err != nil {
-		log.Fatalln("Unable to ensure existence of root:", reply.Err)
+                return 0`, "0")
+	if err != nil {
+		log.Fatalln("Unable to ensure existence of root: with error:", err)
 	}
-	if result, err := reply.Int(); reply.Type == redis.NilReply || err != nil {
-		log.Fatalln("Unable to ensure existence of root:", err)
+	if result, ok := reply.(int64); !ok {
+		log.Fatalln("Unable to ensure existence of root: in conversion:", ok, reply)
 	} else if result == 1 {
 		log.Println("Root role exists - assuming root exists.")
 		return
@@ -226,7 +231,7 @@ func ensureRoot() {
 	// TODO - add a way for root to bcrypt it's password when it's ready
 	auuid := genUUID()
 	ruuid := genUUID()
-	rootSetupReply := client.Cmd("EVAL", `
+	_, err = redisb.Do(c, "EVAL", `
                         redis.call("SADD", "IDENTITY:LIST", ARGV[1])
                         redis.call("SET", "IDENTITY:"..ARGV[1], '["root", "'..ARGV[2]..'"]')
                         redis.call("SADD", "UNIQUE:IDENTITY", '"root"')
@@ -237,9 +242,9 @@ func ensureRoot() {
                         redis.call("SADD", "ROOT", ARGV[1])
                         redis.call("SADD", "ROOT", ARGV[3])
                         redis.call("SADD", "ROOT", ARGV[4])
-                        `, 0, iuuid, ipassword, auuid, ruuid)
-	if rootSetupReply.Err != nil {
-		log.Fatalln("Unable to ensure existence of root:", rootSetupReply.Err)
+                        `, "0", iuuid, ipassword, auuid, ruuid)
+	if err != nil {
+		log.Fatalln("Unable to ensure existence of root:", err)
 	}
 	log.Println("Root created.")
 }
@@ -249,13 +254,13 @@ func involvesRoot(uuid string) bool {
 	if len(uuid) == 0 {
 		return false
 	}
-	reply := client.Cmd("SISMEMBER", "ROOT", uuid)
-	if reply.Err != nil {
-		log.Fatalf("Unable to protect root:", reply.Err)
-	}
-	isMember, err := reply.Bool()
+	reply, err := redisb.Do(c, "SISMEMBER", "ROOT", uuid)
 	if err != nil {
 		log.Fatalf("Unable to protect root:", err)
+	}
+	isMember, ok := reply.(bool)
+	if !ok {
+		log.Fatalf("Unable to protect root: failed to convert:", ok)
 	}
 	return isMember
 }
@@ -271,8 +276,8 @@ func has_or_will_get_token(h http.Handler) http.Handler {
 }
 
 func isToken(tuuid string) bool {
-	reply := client.Cmd("GET", "TOKEN:"+tuuid)
-	return reply.Err == nil && reply.Type != redis.NilReply
+	reply, err := redisb.Do(c, "GET", "TOKEN:"+tuuid)
+	return err == nil && reply != nil
 }
 
 func tuuidFrom(r *http.Request) string {
@@ -322,7 +327,7 @@ func requestHasRole(r *http.Request, role string) bool {
 }
 
 func rolesFrom(auuid string) []string {
-	reply := client.Cmd("EVAL", `
+	reply, err := redisb.Do(c, "EVAL", `
                 local c = {}
                 local cursor = "0"
                 local ruuids = nil
@@ -338,12 +343,12 @@ func rolesFrom(auuid string) []string {
                                 done = true
                         end
                 until done
-                return c`, 0, auuid)
-	if reply.Err != nil {
+		return c`, "0", auuid)
+	if err != nil {
 		return nil
 	}
-	result, err := reply.List()
-	if err != nil {
+	result, ok := reply.([]string)
+	if !ok {
 		return nil
 	}
 	return result
@@ -391,22 +396,22 @@ func jsonFrom(r *http.Request, prefix string) ([]byte, error) {
 }
 
 func get(k string) (string, error) {
-	reply := client.Cmd("GET", k)
-	if reply.Err == nil && reply.Type != redis.NilReply {
-		if result, err := reply.Str(); err == nil {
+	reply, err := redisb.Do(c, "GET", k)
+	if err == nil && reply != nil {
+		if result, ok := reply.(string); ok {
 			return result, nil
 		} else {
-			return "", err
+			return "", errors.New("Failed to get: " + k)
 		}
 	} else {
-		return "", reply.Err
+		return "", err
 	}
 }
 
 func getr(k string) ([]string, error) {
-	reply := client.Cmd("GET", k)
-	if reply.Err == nil {
-		if tmp, err := reply.Bytes(); err == nil {
+	reply, err := redisb.Do(c, "GET", k)
+	if err == nil {
+		if tmp, ok := reply.([]byte); ok {
 			var result = []string{}
 			err = json.Unmarshal(tmp, &result)
 			if err != nil {
@@ -415,38 +420,38 @@ func getr(k string) ([]string, error) {
 			result[1] = ""
 			return result, nil
 		} else {
-			return nil, err
+			return nil, errors.New("Failed to getr: " + k)
 		}
 	} else {
-		return nil, reply.Err
+		return nil, err
 	}
 }
 
-func getl(w http.ResponseWriter, r *http.Request, luaArgs ...interface{}) {
-	reply := client.Cmd("EVAL", luaArgs...)
-	if reply.Err == nil {
-		if result, err := reply.Str(); err == nil {
+func getl(w http.ResponseWriter, r *http.Request, la string, lb string, lc string) {
+	reply, err := redisb.Do(c, "EVAL", la, lb, lc)
+	if err == nil {
+		if result, ok := reply.(string); ok {
 			fmt.Fprint(w, result)
 		} else {
-			log.Println("Failed to convert eval to string:", err)
+			log.Println("Failed to convert eval to string: failed conversion:", ok)
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 	} else {
-		log.Println("Failed to run eval:", reply.Err)
+		log.Println("Failed to run eval:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
 func smembers(k string) ([]string, error) {
-	reply := client.Cmd("SMEMBERS", k)
-	if reply.Err == nil {
-		if result, err := reply.List(); err == nil {
+	reply, err := redisb.Do(c, "SMEMBERS", k)
+	if err == nil {
+		if result, ok := reply.([]string); ok {
 			return result, nil
 		} else {
-			return nil, err
+			return nil, errors.New("Failed to convert")
 		}
 	} else {
-		return nil, reply.Err
+		return nil, err
 	}
 }
 
@@ -459,20 +464,20 @@ func add(prefix string, value []byte) (string, error) {
 			return "", err
 		}
 		id = v[0]
-		idCheckReply := client.Cmd("SISMEMBER", "UNIQUE:IDENTITY", id)
-		if idCheckReply.Err != nil {
-			return "", idCheckReply.Err
+		idCheckReply, err := redisb.Do(c, "SISMEMBER", "UNIQUE:IDENTITY", id)
+		if err != nil {
+			return "", err
 		}
-		if unique, err := idCheckReply.Bool(); err != nil || unique {
+		if exists, ok := idCheckReply.(bool); !ok || exists {
 			return "", errors.New(NON_UNIQUE_IDENTITY)
 		}
 	}
 	if prefix == "ROLE" {
-		roleCheckReply := client.Cmd("SISMEMBER", "UNIQUE:ROLE", value)
-		if roleCheckReply.Err != nil {
-			return "", roleCheckReply.Err
+		roleCheckReply, err := redisb.Do(c, "SISMEMBER", "UNIQUE:ROLE", string(value))
+		if err != nil {
+			return "", err
 		}
-		if unique, err := roleCheckReply.Bool(); err != nil || unique {
+		if exists, ok := roleCheckReply.(bool); !ok || exists {
 			return "", errors.New(NON_UNIQUE_ROLE)
 		}
 	}
@@ -493,20 +498,20 @@ func add(prefix string, value []byte) (string, error) {
 			log.Panicf("Unable to encode encrypted password: %s", err)
 		}
 	}
-	if reply := client.Cmd("SET", prefix+":"+uuid, value); reply.Err != nil {
-		return "", reply.Err
+	if _, err := redisb.Do(c, "SET", prefix+":"+uuid, string(value)); err != nil {
+		return "", err
 	}
-	if reply := client.Cmd("SADD", prefix+":LIST", uuid); reply.Err != nil {
-		return "", reply.Err
+	if _, err := redisb.Do(c, "SADD", prefix+":LIST", uuid); err != nil {
+		return "", err
 	}
 	if prefix == "IDENTITY" {
-		if reply := client.Cmd("SADD", "UNIQUE:IDENTITY", id); reply.Err != nil {
-			return "", reply.Err
+		if _, err := redisb.Do(c, "SADD", "UNIQUE:IDENTITY", id); err != nil {
+			return "", err
 		}
 	}
 	if prefix == "ROLE" {
-		if reply := client.Cmd("SADD", "UNIQUE:ROLE", value); reply.Err != nil {
-			return "", reply.Err
+		if _, err := redisb.Do(c, "SADD", "UNIQUE:ROLE", string(value)); err != nil {
+			return "", err
 		}
 	}
 	return uuid, nil
@@ -521,32 +526,32 @@ func update(prefix string, uuid string, value []byte) error {
 			return err
 		}
 		id = v[0]
-		idCheckReply := client.Cmd("SISMEMBER", "UNIQUE:IDENTITY", id)
-		if idCheckReply.Err != nil {
-			return idCheckReply.Err
+		idCheckReply, err := redisb.Do(c, "SISMEMBER", "UNIQUE:IDENTITY", id)
+		if err != nil {
+			return err
 		}
-		if unique, err := idCheckReply.Bool(); err != nil || unique {
+		if exists, ok := idCheckReply.(bool); !ok || exists {
 			return errors.New(NON_UNIQUE_IDENTITY)
 		}
 	}
 	if prefix == "ROLE" {
-		roleCheckReply := client.Cmd("SISMEMBER", "UNIQUE:ROLE", value)
-		if roleCheckReply.Err != nil {
-			return roleCheckReply.Err
+		roleCheckReply, err := redisb.Do(c, "SISMEMBER", "UNIQUE:ROLE", string(value))
+		if err != nil {
+			return err
 		}
-		if unique, err := roleCheckReply.Bool(); err != nil || unique {
+		if exists, ok := roleCheckReply.(bool); !ok || exists {
 			return errors.New(NON_UNIQUE_ROLE)
 		}
 	}
 	previousID := ""
 	if prefix == "IDENTITY" {
-		previousReply := client.Cmd("GET", "IDENTITY:"+uuid)
-		if previousReply.Err != nil {
-			return previousReply.Err
-		}
-		previousb, err := previousReply.Bytes()
+		previousReply, err := redisb.Do(c, "GET", "IDENTITY:"+uuid)
 		if err != nil {
 			return err
+		}
+		previousb, ok := previousReply.([]byte)
+		if !ok {
+			return errors.New("Failed to convert")
 		}
 		idPair := []string{}
 		if err := json.Unmarshal(previousb, &idPair); err != nil {
@@ -556,13 +561,13 @@ func update(prefix string, uuid string, value []byte) error {
 	}
 	previousRole := ""
 	if prefix == "ROLE" {
-		previousReply := client.Cmd("GET", "ROLE:"+uuid)
-		if previousReply.Err != nil {
-			return previousReply.Err
-		}
-		previousRoleTmp, err := previousReply.Str()
+		previousReply, err := redisb.Do(c, "GET", "ROLE:"+uuid)
 		if err != nil {
 			return err
+		}
+		previousRoleTmp, ok := previousReply.(string)
+		if ok {
+			return errors.New("Failed to convert")
 		}
 		previousRole = previousRoleTmp
 	}
@@ -582,8 +587,11 @@ func update(prefix string, uuid string, value []byte) error {
 			log.Panicf("Unable to encode encrypted password: %s", err)
 		}
 	}
-	reply := client.Cmd("SET", prefix+":"+uuid, value, "XX")
-	if reply.Type == redis.NilReply {
+	reply, err := redisb.Do(c, "SET", prefix+":"+uuid, string(value), "XX")
+	if err != nil {
+		return errors.New("Updating failed to check for existence of key")
+	}
+	if reply == nil {
 		return errors.New("Updating requires the key to already exist")
 	}
 	if prefix == "IDENTITY" {
@@ -591,37 +599,37 @@ func update(prefix string, uuid string, value []byte) error {
 		if err := json.Unmarshal(value, &idPair); err != nil {
 			return err
 		}
-		if reply := client.Cmd("SADD", "UNIQUE:IDENTITY", id); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SADD", "UNIQUE:IDENTITY", id); err != nil {
+			return err
 		}
-		if reply := client.Cmd("SREM", "UNIQUE:IDENTITY", previousID); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SREM", "UNIQUE:IDENTITY", previousID); err != nil {
+			return err
 		}
 	}
 	if prefix == "ROLE" {
-		if reply := client.Cmd("SADD", "UNIQUE:ROLE", value); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SADD", "UNIQUE:ROLE", string(value)); err != nil {
+			return err
 		}
-		if reply := client.Cmd("SREM", "UNIQUE:ROLE", previousRole); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SREM", "UNIQUE:ROLE", previousRole); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func del(prefix string, uuid string) error {
-	if reply := client.Cmd("SREM", prefix+":LIST", uuid); reply.Err != nil {
-		return reply.Err
+	if _, err := redisb.Do(c, "SREM", prefix+":LIST", uuid); err != nil {
+		return err
 	}
 	id := ""
 	if prefix == "IDENTITY" {
-		previousReply := client.Cmd("GET", "IDENTITY:"+uuid)
-		if previousReply.Err != nil {
-			return previousReply.Err
-		}
-		previousb, err := previousReply.Bytes()
+		previousReply, err := redisb.Do(c, "GET", "IDENTITY:"+uuid)
 		if err != nil {
 			return err
+		}
+		previousb, ok := previousReply.([]byte)
+		if !ok {
+			return errors.New("Failed conversion")
 		}
 		idPair := []string{}
 		if err := json.Unmarshal(previousb, &idPair); err != nil {
@@ -631,65 +639,65 @@ func del(prefix string, uuid string) error {
 	}
 	role := ""
 	if prefix == "ROLE" {
-		previousReply := client.Cmd("GET", "ROLE:"+uuid)
-		if previousReply.Err != nil {
-			return previousReply.Err
-		}
-		roleTmp, err := previousReply.Str()
+		previousReply, err := redisb.Do(c, "GET", "ROLE:"+uuid)
 		if err != nil {
 			return err
+		}
+		roleTmp, ok := previousReply.(string)
+		if !ok {
+			return errors.New("Failed to convert")
 		}
 		role = roleTmp
 	}
-	if reply := client.Cmd("DEL", prefix+":"+uuid); reply.Err != nil {
-		return reply.Err
+	if _, err := redisb.Do(c, "DEL", prefix+":"+uuid); err != nil {
+		return err
 	}
 	if prefix == "IDENTITY" {
-		auuidReply := client.Cmd("GET", "IDENTITY:ACTOR:"+uuid)
-		if auuidReply.Err != nil {
-			return auuidReply.Err
-		}
-		auuid, err := auuidReply.Str()
+		auuidReply, err := redisb.Do(c, "GET", "IDENTITY:ACTOR:"+uuid)
 		if err != nil {
 			return err
 		}
-		if reply := client.Cmd("DEL", "IDENTITY:ACTOR:"+uuid); reply.Err != nil {
-			return reply.Err
+		auuid, ok := auuidReply.(string)
+		if !ok {
+			return errors.New("Failed to convert")
 		}
-		if reply := client.Cmd("SREM", "ACTOR:IDENTITY:"+auuid, uuid); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "DEL", "IDENTITY:ACTOR:"+uuid); err != nil {
+			return err
 		}
-		if reply := client.Cmd("SREM", "UNIQUE:IDENTITY", id); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SREM", "ACTOR:IDENTITY:"+auuid, uuid); err != nil {
+			return err
+		}
+		if _, err := redisb.Do(c, "SREM", "UNIQUE:IDENTITY", id); err != nil {
+			return err
 		}
 	}
 	if prefix == "ROLE" {
-		if reply := client.Cmd("SREM", "UNIQUE:ROLE", role); reply.Err != nil {
-			return reply.Err
+		if _, err := redisb.Do(c, "SREM", "UNIQUE:ROLE", role); err != nil {
+			return err
 		}
 	}
 	if prefix == "ACTOR" {
-		iuuidsReply := client.Cmd("SMEMBERS", "ACTOR:IDENTITY:"+uuid)
-		if iuuidsReply.Err != nil {
-			return iuuidsReply.Err
-		}
-		iuuids, err := iuuidsReply.List()
+		iuuidsReply, err := redisb.Do(c, "SMEMBERS", "ACTOR:IDENTITY:"+uuid)
 		if err != nil {
 			return err
 		}
-		if reply := client.Cmd("DEL", "ACTOR:IDENTITY:"+uuid); reply.Err != nil {
-			return reply.Err
+		iuuids, ok := iuuidsReply.([]string)
+		if !ok {
+			return errors.New("Failed to convert")
+		}
+		if _, err := redisb.Do(c, "DEL", "ACTOR:IDENTITY:"+uuid); err != nil {
+			return err
 		}
 		for _, iuuid := range iuuids {
-			if reply := client.Cmd("DEL", "IDENTITY:ACTOR:"+iuuid); reply.Err != nil {
-				return reply.Err
+			if _, err := redisb.Do(c, "DEL", "IDENTITY:ACTOR:"+iuuid); err != nil {
+				return err
 			}
-			idReply := client.Cmd("GET", "IDENTITY:"+iuuid)
-			if idReply.Err != nil {
-				return idReply.Err
-			}
-			idb, err := idReply.Bytes()
+			idReply, err := redisb.Do(c, "GET", "IDENTITY:"+iuuid)
 			if err != nil {
+				return err
+			}
+			idb, ok := idReply.([]byte)
+			if !ok {
 				return err
 			}
 			idPair := []string{}
@@ -697,8 +705,8 @@ func del(prefix string, uuid string) error {
 				return err
 			}
 			id = idPair[0]
-			if reply := client.Cmd("SREM", "UNIQUE:IDENTITY", id); reply.Err != nil {
-				return reply.Err
+			if _, err := redisb.Do(c, "SREM", "UNIQUE:IDENTITY", id); err != nil {
+				return err
 			}
 		}
 	}
@@ -768,7 +776,7 @@ func genericGetAll(w http.ResponseWriter, r *http.Request, k string) {
                                 done = true
                         end
                 until done
-                return cjson.encode(c)`, 0, k)
+                return cjson.encode(c)`, "0", k)
 }
 
 func identityGetAll(w http.ResponseWriter, r *http.Request, k string) {
@@ -792,7 +800,7 @@ func identityGetAll(w http.ResponseWriter, r *http.Request, k string) {
                                 done = true
                         end
                 until done
-                return cjson.encode(c)`, 0, k)
+                return cjson.encode(c)`, "0", k)
 }
 
 func genericGet(w http.ResponseWriter, r *http.Request, k string) {
@@ -876,13 +884,13 @@ func aiPost(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	auuidReply := client.Cmd("EXISTS", "ACTOR:"+auuid)
-	if auuidReply.Err != nil {
-		log.Println("POSTing to '/ai' - unable to verify if the given auuid exists:", auuidReply.Err)
+	auuidReply, err := redisb.Do(c, "EXISTS", "ACTOR:"+auuid)
+	if err != nil {
+		log.Println("POSTing to '/ai' - unable to verify if the given auuid exists:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if auuidExists, err := auuidReply.Bool(); err != nil || !auuidExists {
+	if auuidExists, ok := auuidReply.(bool); !ok || !auuidExists {
 		log.Println("POSTing to '/ai' requires the auuid to already exist.")
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -893,23 +901,23 @@ func aiPost(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	iuuidReply := client.Cmd("EXISTS", "IDENTITY:"+iuuid)
-	if iuuidReply.Err != nil {
-		log.Println("POSTing to '/ai' - unable to verify if the given iuuid exists:", iuuidReply.Err)
+	iuuidReply, err := redisb.Do(c, "EXISTS", "IDENTITY:"+iuuid)
+	if err != nil {
+		log.Println("POSTing to '/ai' - unable to verify if the given iuuid exists:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if iuuidExists, err := iuuidReply.Bool(); err != nil || !iuuidExists {
+	if iuuidExists, ok := iuuidReply.(bool); !ok || !iuuidExists {
 		log.Println("POSTing to '/ai' requires the iuuid to already exist.")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if err := client.Cmd("SADD", "ACTOR:IDENTITY:"+auuid, iuuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SADD", "ACTOR:IDENTITY:"+auuid, iuuid); err != nil {
 		log.Println("Failed to associate an actor to an identity: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if err := client.Cmd("SET", "IDENTITY:ACTOR:"+iuuid, auuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SET", "IDENTITY:ACTOR:"+iuuid, auuid); err != nil {
 		log.Println("Failed to associate an identity to an actor: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -923,8 +931,8 @@ func aiGet(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	actorReply := client.Cmd("EXISTS", "ACTOR:IDENTITY:"+uuid)
-	if actorReply.Err == nil && actorReply.Type != redis.NilReply {
+	actorReply, err := redisb.Do(c, "EXISTS", "ACTOR:IDENTITY:"+uuid)
+	if err == nil && actorReply != nil {
 		actorIdentities, err := smembers("ACTOR:IDENTITY:" + uuid)
 		if err == nil {
 			result, err := json.Marshal(actorIdentities)
@@ -937,8 +945,8 @@ func aiGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	identityReply := client.Cmd("EXISTS", "IDENTITY:ACTOR:"+uuid)
-	if identityReply.Err == nil && identityReply.Type != redis.NilReply {
+	identityReply, err := redisb.Do(c, "EXISTS", "IDENTITY:ACTOR:"+uuid)
+	if err == nil && identityReply != nil {
 		identityActor, err := get("IDENTITY:ACTOR" + uuid)
 		if err == nil {
 			result, err := json.Marshal(identityActor)
@@ -972,7 +980,7 @@ func aiGetAll(w http.ResponseWriter, r *http.Request) {
                                 done = true
                         end
                 until done
-                return cjson.encode(c)`, 0)
+                return cjson.encode(c)`, "0", "")
 }
 
 func aiDelete(w http.ResponseWriter, r *http.Request) {
@@ -1000,7 +1008,7 @@ func aiDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func sremActorIdentity(w http.ResponseWriter, auuid string, iuuid string) error {
-	if err := client.Cmd("SREM", "ACTOR:IDENTITY:"+auuid, iuuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SREM", "ACTOR:IDENTITY:"+auuid, iuuid); err != nil {
 		log.Println("Failed to delete association between an actor and an identity: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return err
@@ -1009,7 +1017,7 @@ func sremActorIdentity(w http.ResponseWriter, auuid string, iuuid string) error 
 }
 
 func delIdentityActor(w http.ResponseWriter, iuuid string) error {
-	if err := client.Cmd("DEL", "IDENTITY:ACTOR:"+iuuid).Err; err != nil {
+	if _, err := redisb.Do(c, "DEL", "IDENTITY:ACTOR:"+iuuid); err != nil {
 		log.Println("Failed to delete association between an identity and an actor: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return err
@@ -1027,13 +1035,13 @@ func arPost(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	auuidReply := client.Cmd("EXISTS", "ACTOR:"+auuid)
-	if auuidReply.Err != nil {
-		log.Println("POSTing to '/ar' - unable to verify if the given auuid exists:", auuidReply.Err)
+	auuidReply, err := redisb.Do(c, "EXISTS", "ACTOR:"+auuid)
+	if err != nil {
+		log.Println("POSTing to '/ar' - unable to verify if the given auuid exists:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if auuidExists, err := auuidReply.Bool(); err != nil || !auuidExists {
+	if auuidExists, ok := auuidReply.(bool); !ok || !auuidExists {
 		log.Println("POSTing to '/ar' requires the auuid to already exist.")
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -1044,23 +1052,23 @@ func arPost(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	ruuidReply := client.Cmd("EXISTS", "ROLE:"+ruuid)
-	if ruuidReply.Err != nil {
-		log.Println("POSTing to '/ar' - unable to verify if the given ruuid exists:", ruuidReply.Err)
+	ruuidReply, err := redisb.Do(c, "EXISTS", "ROLE:"+ruuid)
+	if err != nil {
+		log.Println("POSTing to '/ar' - unable to verify if the given ruuid exists:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if ruuidExists, err := ruuidReply.Bool(); err != nil || !ruuidExists {
+	if ruuidExists, ok := ruuidReply.(bool); !ok || !ruuidExists {
 		log.Println("POSTing to '/ar' requires the ruuid to already exist.")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if err := client.Cmd("SADD", "ACTOR:ROLE:"+auuid, ruuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SADD", "ACTOR:ROLE:"+auuid, ruuid); err != nil {
 		log.Println("Failed to associate an actor to a role: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if err := client.Cmd("SADD", "ROLE:ACTOR:"+ruuid, auuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SADD", "ROLE:ACTOR:"+ruuid, auuid); err != nil {
 		log.Println("Failed to associate a role to an actor: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -1074,8 +1082,8 @@ func arGet(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	actorReply := client.Cmd("EXISTS", "ACTOR:ROLE:"+uuid)
-	if actorReply.Err == nil && actorReply.Type != redis.NilReply {
+	actorReply, err := redisb.Do(c, "EXISTS", "ACTOR:ROLE:"+uuid)
+	if err == nil && actorReply != nil {
 		actorRole, err := smembers("ACTOR:ROLE:" + uuid)
 		if err == nil {
 			result, err := json.Marshal(actorRole)
@@ -1088,8 +1096,8 @@ func arGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	roleReply := client.Cmd("EXISTS", "ROLE:ACTOR:"+uuid)
-	if roleReply.Err == nil && roleReply.Type != redis.NilReply {
+	roleReply, err := redisb.Do(c, "EXISTS", "ROLE:ACTOR:"+uuid)
+	if err == nil && roleReply != nil {
 		roleActor, err := smembers("ROLE:ACTOR:" + uuid)
 		if err == nil {
 			result, err := json.Marshal(roleActor)
@@ -1123,7 +1131,7 @@ func arGetAll(w http.ResponseWriter, r *http.Request) {
                                 done = true
                         end
                 until done
-                return cjson.encode(c)`, 0)
+                return cjson.encode(c)`, "0", "")
 }
 
 func arDelete(w http.ResponseWriter, r *http.Request) {
@@ -1142,12 +1150,12 @@ func arDelete(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if err := client.Cmd("SREM", "ACTOR:ROLE:"+auuid, ruuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SREM", "ACTOR:ROLE:"+auuid, ruuid); err != nil {
 		log.Println("Failed to associate an actor to a role: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if err := client.Cmd("SREM", "ROLE:ACTOR:"+ruuid, auuid).Err; err != nil {
+	if _, err := redisb.Do(c, "SREM", "ROLE:ACTOR:"+ruuid, auuid); err != nil {
 		log.Println("Failed to associate a role to an actor: ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -1187,7 +1195,7 @@ func zGet(w http.ResponseWriter, r *http.Request) {
                         end
                 until done
                 return nil
-                `, 0, id)
+                `, "0", id)
 }
 
 func tGet(w http.ResponseWriter, r *http.Request) {
@@ -1198,7 +1206,7 @@ func tGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authHeaderPair := strings.Split(string(tmp), ":")
-	reply := client.Cmd("EVAL", `
+	reply, err := redisb.Do(c, "EVAL", `
                 local cursor = "0"
                 local iuuids = nil
                 local identityPair = {}
@@ -1217,40 +1225,40 @@ func tGet(w http.ResponseWriter, r *http.Request) {
                                 done = true
                         end
                 until done
-                return {}`, 0, authHeaderPair[0])
-	if reply.Err != nil {
-		log.Println("Unable to run get token script:", reply.Err)
+                return {}`, "0", authHeaderPair[0])
+	if err != nil {
+		log.Println("Unable to run get token script:", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	resultPair, err := reply.List()
-	if err != nil {
-		log.Println("Unable to get token:", err)
+	resultPair, ok := reply.([]string)
+	if !ok {
+		log.Println("Unable to get token: failed to convert")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if len(resultPair) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
-                return
+		return
 	}
 	iuuid := resultPair[0]
-        givenPassword := ""
-        if json.Unmarshal([]byte(authHeaderPair[1]), &givenPassword) != nil {
-                log.Println("Unable to unmarshal password from authpair:", err)
-                w.WriteHeader(http.StatusInternalServerError)
-                return
-        }
+	givenPassword := ""
+	if json.Unmarshal([]byte(authHeaderPair[1]), &givenPassword) != nil {
+		log.Println("Unable to unmarshal password from authpair:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	hashedPassword := resultPair[1]
 	if len(iuuid) == 0 || bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(givenPassword)) != nil {
 		w.WriteHeader(http.StatusBadRequest)
-                return
+		return
 	}
-        tuuid := genUUID()
-        setReply := client.Cmd("SET", "TOKEN:"+tuuid, iuuid, "EX", *tokenTTL)
-        if setReply.Err != nil {
-                log.Println("Unable to set token:", setReply.Err)
-                w.WriteHeader(http.StatusInternalServerError)
-        } else {
-                w.Write([]byte(tuuid))
-        }
+	tuuid := genUUID()
+	_, err = redisb.Do(c, "SET", "TOKEN:"+tuuid, iuuid, "EX", *tokenTTL)
+	if err != nil {
+		log.Println("Unable to set token:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	} else {
+		w.Write([]byte(tuuid))
+	}
 }
