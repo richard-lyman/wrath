@@ -20,14 +20,23 @@ A Relationship  is referred to through a UUID, with the following as possible re
 
 TERMS
 
-Token: the temporary proof of having provided a valid Identity
+Token:
+	the temporary proof of having provided a valid Identity
+Authentication:
+	the process of an Actor providing an Identity and recieving a Token
+Authorization:
+	the verification that a Token is related to a Role
 
-Authentication: the process of an Actor providing an Identity and recieving a Token
+Authorization highlights
 
-Authorization: the verification that a Token is related to a Role
- * Nothing can be done without a valid Token
- * The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role
- * No other Role represents the authorization for any action in the system
+Nothing can be done without a valid Token.
+The root role represents authorization to do anything in the system - except delete the root identity, root actor, root role, or the relation of root identity to root actor, or the relation of root actor to root role.
+No other Role represents the authorization for any action in the system.
+
+The root role is a Role who's value is the JSON string `"root"`.
+A Token is a UUID whos value is a tuuid (see the '/t' definition below).
+Without a token, a 401 is returned for all calls.
+Without a valid token representing the authorization of the root role, a 403 is returned.
 
 REDIS KEY TYPES
 
@@ -47,15 +56,6 @@ REDIS KEY TYPES
 
         ACTOR:ROLE:auuid        set of 'ruuids'
         ROLE:ACTOR:ruuid        set of 'auuids'
-
-
-The root role is a Role who's value is the JSON string `"root"`
-
-A Token is a UUID whos value is an iuuid, see the '/t' definition below
-
-Without a token, a 401 is returned
-
-Without a valid token representing the authorization of the root role, a 403 is returned
 
 ROUTES
 
